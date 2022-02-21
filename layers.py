@@ -14,6 +14,7 @@ import numpy as np
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from util import masked_softmax
 
+
 class Embedding(nn.Module):
     """Embedding layer used by BiDAF, without the character-level component.
 
@@ -30,6 +31,7 @@ class Embedding(nn.Module):
         hidden_size (int): Size of hidden activations.
         drop_prob (float): Probability of zero-ing out activations
     """
+
     def __init__(self, char_vectors, word_vectors,
                  char_emb_size, hidden_size, drop_prob):
         super(Embedding, self).__init__()
@@ -41,19 +43,19 @@ class Embedding(nn.Module):
         self.hwy = HighwayEncoder(2, hidden_size)
 
     def forward(self, char, word):
-        char_emb = self.char_embed(char) # (batch_size, seq_len, max_word_len, char_emb_size)
-        word_emb = self.word_embed(word)   # (batch_size, seq_len, word_embed_size)
+        char_emb = self.char_embed(char)  # (batch_size, seq_len, max_word_len, char_emb_size)
+        word_emb = self.word_embed(word)  # (batch_size, seq_len, word_embed_size)
 
-        char_emb = self.char_conv(char_emb) # (batch_size, seq_len, word_emb_size)
+        char_emb = self.char_conv(char_emb)  # (batch_size, seq_len, word_emb_size)
 
         char_emb = F.dropout(char_emb, self.drop_prob, self.training)
         word_emb = F.dropout(word_emb, self.drop_prob, self.training)
 
         # Concatenate here:
-        emb = torch.cat((word_emb, char_emb), dim=2) # (batch_size, seq_len, word_emb + char_emb)
+        emb = torch.cat((word_emb, char_emb), dim=2)  # (batch_size, seq_len, word_emb + char_emb)
 
         emb = self.proj(emb)  # (batch_size, seq_len, hidden_size)
-        emb = self.hwy(emb)   # (batch_size, seq_len, hidden_size)
+        emb = self.hwy(emb)  # (batch_size, seq_len, hidden_size)
 
         return emb
 
@@ -86,12 +88,13 @@ class CharCNN(nn.Module):
         b = x.shape[0]
         seq_len = x.shape[1]
         # Transpose as middle index must be embedding size (as this is width of conv filter)
-        x = x.view(b * seq_len, x.shape[2], x.shape[3]).transpose(1, 2) # (batch_size * seq_len, char_emb_size, max_word_len)
+        x = x.view(b * seq_len, x.shape[2], x.shape[3]).transpose(1,
+                                                                  2)  # (batch_size * seq_len, char_emb_size, max_word_len)
 
-        x = self.conv_layer(x) # (batch_size * seq_len, out_channels, conv_out)
+        x = self.conv_layer(x)  # (batch_size * seq_len, out_channels, conv_out)
 
         # Reshape x back into 4 dims
-        x = x.view(b, seq_len, x.shape[1], -1) # (batch_size, seq_len, out_channels, conv_out)
+        x = x.view(b, seq_len, x.shape[1], -1)  # (batch_size, seq_len, out_channels, conv_out)
 
         # Take max over rows of (out_channels, conv_out) matrix as described in QANet paper.
         # QANet paper describes characters concatenated row-wise to make word (what we have
@@ -100,10 +103,9 @@ class CharCNN(nn.Module):
 
         # We could have used maxpool but max is better as it will always remove last dimension
         # regardless of kernel size (we do not have to manually adjust maxpool filter size).
-        x, _ = torch.max(x, dim=3) # (batch_size, seq_len, out_channels)
+        x, _ = torch.max(x, dim=3)  # (batch_size, seq_len, out_channels)
 
         return x
-
 
 
 class HighwayEncoder(nn.Module):
@@ -118,6 +120,7 @@ class HighwayEncoder(nn.Module):
         num_layers (int): Number of layers in the highway encoder.
         hidden_size (int): Size of hidden activations.
     """
+
     def __init__(self, num_layers, hidden_size):
         super(HighwayEncoder, self).__init__()
         self.transforms = nn.ModuleList([nn.Linear(hidden_size, hidden_size)
@@ -133,6 +136,7 @@ class HighwayEncoder(nn.Module):
             x = g * t + (1 - g) * x
 
         return x
+
 
 class PositionalEncoding(nn.Module):
     """
@@ -155,6 +159,7 @@ class PositionalEncoding(nn.Module):
 
     Leverages broadcast summation to add to x.
     """
+
     def __init__(self):
         super(PositionalEncoding, self).__init__()
 
@@ -169,7 +174,7 @@ class PositionalEncoding(nn.Module):
 
         # Then, get the next term without position multiplied to it. We only want even
         # columns. Need to use numpy as torch.log only accepts tensors.
-        encoder = torch.exp(np.log(1/10000) * (2 * torch.tensor(range(0, emb_dim, 2))) / emb_dim)
+        encoder = torch.exp(np.log(1 / 10000) * (2 * torch.tensor(range(0, emb_dim, 2))) / emb_dim)
 
         PE = torch.zeros((seq_len, emb_dim))
         # Now, outer product the position and encoder (of even j) into the odd
@@ -179,9 +184,10 @@ class PositionalEncoding(nn.Module):
         PE[:, range(1, emb_dim, 2)] = torch.cos(torch.outer(pos, encoder))
 
         # Now, add to x unsqueezing along batch dimension for broadcast sum
-        x = x + PE.unsqueeze(0) # (batch_size, seq_len, emb_dim) + (1, seq_len, emb_dim)
+        x = x + PE.unsqueeze(0)  # (batch_size, seq_len, emb_dim) + (1, seq_len, emb_dim)
 
         return x
+
 
 class DepthwiseSeparableConvolutions(nn.Module):
     """
@@ -212,6 +218,7 @@ class DepthwiseSeparableConvolutions(nn.Module):
     Thus, we need kernel_size to be an odd number, with padding of (kernel_size - 1) / 2 to maintain
     the dimensions.
     """
+
     def __init__(self, in_channels, out_channels, kernel_size):
         super(DepthwiseSeparableConvolutions, self).__init__()
         # Kernel Size must be odd to retain dimensions. If even, increment by 1
@@ -238,81 +245,14 @@ class DepthwiseSeparableConvolutions(nn.Module):
 
         # Apply the convolutions as described
         # https://towardsdatascience.com/a-basic-introduction-to-separable-convolutions-b99ec3102728
-        x = self.depthwise_conv(x) # (batch_size, embedding_dim, seq_len)
-        x = self.pointwise_conv(x) # (batch_size, out_channels, seq_len)
+        x = self.depthwise_conv(x)  # (batch_size, embedding_dim, seq_len)
+        x = self.pointwise_conv(x)  # (batch_size, out_channels, seq_len)
 
         # Transpose x back to # (batch_size, seq_len, out_channels)
         x = x.transpose(1, 2)
 
         return x
 
-class FeedForwardNet(nn.Module):
-    """
-    Implements a simple two-layer MLP since this is the described feed forward net
-    in lecture 09 of CS224n (on transformers). Thus, while the authors of the QANet
-    do not explicitly describe the FeedForwardNet, this seems most appropriate.
-    """
-    def __init__(self, embedding_dim, hidden_size):
-        super(FeedForwardNet).__init__()
-        # Include bias in both linear terms
-        self.w1 = nn.Linear(in_features=embedding_dim, out_features=hidden_size)
-        self.relu = nn.ReLU()
-        self.w2 = nn.Linear(in_features=hidden_size, out_features=embedding_dim)
-
-    def forward(self, x):
-        # (w_1 * x + b_1)
-        x = self.w1(x)
-        # ReLU(w_1 * x + b_1)
-        x = self.relu(x)
-        # W_2 * ReLU(w_1 * x + b_1) + b_2
-        x = self.w2(x)
-        return x
-
-class RNNEncoder(nn.Module):
-    """General-purpose layer for encoding a sequence using a bidirectional RNN.
-
-    Encoded output is the RNN's hidden state at each position, which
-    has shape `(batch_size, seq_len, hidden_size * 2)`.
-
-    Args:
-        input_size (int): Size of a single timestep in the input.
-        hidden_size (int): Size of the RNN hidden state.
-        num_layers (int): Number of layers of RNN cells to use.
-        drop_prob (float): Probability of zero-ing out activations.
-    """
-    def __init__(self,
-                 input_size,
-                 hidden_size,
-                 num_layers,
-                 drop_prob=0.):
-        super(RNNEncoder, self).__init__()
-        self.drop_prob = drop_prob
-        self.rnn = nn.LSTM(input_size, hidden_size, num_layers,
-                           batch_first=True,
-                           bidirectional=True,
-                           dropout=drop_prob if num_layers > 1 else 0.)
-
-    def forward(self, x, lengths):
-        # Save original padded length for use by pad_packed_sequence
-        orig_len = x.size(1)
-
-        # Sort by length and pack sequence for RNN
-        lengths, sort_idx = lengths.sort(0, descending=True)
-        x = x[sort_idx]     # (batch_size, seq_len, input_size)
-        x = pack_padded_sequence(x, lengths.cpu(), batch_first=True)
-
-        # Apply RNN
-        x, _ = self.rnn(x)  # (batch_size, seq_len, 2 * hidden_size)
-
-        # Unpack and reverse sort
-        x, _ = pad_packed_sequence(x, batch_first=True, total_length=orig_len)
-        _, unsort_idx = sort_idx.sort(0)
-        x = x[unsort_idx]   # (batch_size, seq_len, 2 * hidden_size)
-
-        # Apply dropout (RNN applies dropout after all but the last layer)
-        x = F.dropout(x, self.drop_prob, self.training)
-
-        return x
 
 class QANetSelfAttention(nn.Module):
     """
@@ -320,6 +260,7 @@ class QANetSelfAttention(nn.Module):
     paper for Transformers "Attention is All You Need":
     https://arxiv.org/pdf/1706.03762.pdf
     """
+
     def __init__(self, embedding_dim, num_heads):
         super(QANetSelfAttention, self).__init__()
         self.key_matrix = nn.Linear(embedding_dim, embedding_dim)
@@ -341,6 +282,166 @@ class QANetSelfAttention(nn.Module):
         return x
 
 
+class FeedForwardNet(nn.Module):
+    """
+    Implements a simple two-layer MLP since this is the described feed forward net
+    in lecture 09 of CS224n (on transformers). Thus, while the authors of the QANet
+    do not explicitly describe the FeedForwardNet, this seems most appropriate.
+    """
+
+    def __init__(self, embedding_dim, hidden_size):
+        super(FeedForwardNet).__init__()
+        # Include bias in both linear terms
+        self.w1 = nn.Linear(in_features=embedding_dim, out_features=hidden_size)
+        self.relu = nn.ReLU()
+        self.w2 = nn.Linear(in_features=hidden_size, out_features=embedding_dim)
+
+    def forward(self, x):
+        # (w_1 * x + b_1)
+        x = self.w1(x)
+        # ReLU(w_1 * x + b_1)
+        x = self.relu(x)
+        # W_2 * ReLU(w_1 * x + b_1) + b_2
+        x = self.w2(x)
+        return x
+
+
+class EncoderBlock(nn.Module):
+    """
+    A single Encoder Block as shown on the right side of figure 1 of the
+    QANet paper: https://arxiv.org/pdf/1804.09541.pdf
+
+    Basic Architecture:
+    Position Encoding + (LayerNorm + DepthwiseSeparable Conv) x num_conv + (LayerNorm + SelfAttention)
+    + (Layernorm + FeedForwardNet)
+
+    Note, there is full identity path from input to output of each block, meaning for conv/selfattention/ffn
+    functions f, we perform f(layernorm(x)) + x
+    """
+
+    def __init__(self, num_conv, input_emb_size, output_emb_size, kernel_size, num_heads):
+        super(EncoderBlock, self).__init__()
+        assert num_conv > 0, 'There must be at least 1 convolution layer in an Encoder Block'
+        self.position_encoder = PositionalEncoding()
+        self.conv_layers = nn.ModuleList([])
+        # First conv layer input --> output.
+        self.conv_layers.append(DepthwiseSeparableConvolutions(in_channels=input_emb_size,
+                                                               out_channels=output_emb_size,
+                                                               kernel_size=kernel_size))
+        for i in range(num_conv - 1):
+            # The rest of the layers are output --> output
+            self.conv_layers.append(DepthwiseSeparableConvolutions(in_channels=output_emb_size,
+                                                                   out_channels=output_emb_size,
+                                                                   kernel_size=kernel_size))
+        self.self_attention = QANetSelfAttention(embedding_dim=output_emb_size,
+                                                 num_heads=num_heads)
+        self.feed_forward_net = FeedForwardNet(embedding_dim=output_emb_size, hidden_size=output_emb_size)
+
+    def forward(self, x):
+        # First, add the PositionalEncoding
+        x = x + self.position_encoder(x)
+
+        # First, repeat conv(layernorm(x)) + x for all conv layers
+        for conv in self.conv_layers:
+            out = x.clone()
+            x = F.layer_norm(x, x.shape[1:])
+            x = conv(x)
+            x = x + out
+
+        # Now, self_attention(layernorm(x)) + x
+        out = x.clone()
+        x = F.layer_norm(x, x.shape[1:])
+        x = self.self_attention(x)
+        x = x + out
+
+        # Now, feed_forward_net(layernorm(x)) + x
+        out = x.clone()
+        x = F.layer_norm(x, x.shape[1:])
+        x = self.feed_forward_net(x)
+        x = x + out
+
+        return x
+
+
+class EncoderStack(nn.Module):
+    """
+    This stacks Encoder Blocks for the embeddings and model, illustrated by the
+    "Stacked Embedding Encoder Blocks" and "Stacked Model Encoder Blocks"
+    section of figure 4 of the QANet paper: https://arxiv.org/pdf/1804.09541.pdf
+    """
+
+    def __init__(self, num_blocks, num_conv_layers, input_emb_size, output_emb_size,
+                 kernel_size, num_attn_heads):
+        super(EncoderStack, self).__init__()
+        assert num_blocks > 0, 'There must be at least 1 block i the Embedding Encoder Stack'
+        self.encoder_blocks = nn.ModuleList([])
+        self.encoder_blocks.append(EncoderBlock(num_conv=num_conv_layers,
+                                                input_emb_size=input_emb_size,
+                                                output_emb_size=output_emb_size,
+                                                kernel_size=kernel_size,
+                                                num_heads=num_attn_heads))
+        for i in range(num_blocks - 1):
+            self.encoder_blocks.append(EncoderBlock(num_conv=num_conv_layers,
+                                                    input_emb_size=output_emb_size,
+                                                    output_emb_size=output_emb_size,
+                                                    kernel_size=kernel_size,
+                                                    num_heads=num_attn_heads))
+
+    def forward(self, x):
+        # x of shape (batch_size, seq_len, input_emb_size)
+        for encoder_block in self.encoder_blocks:
+            x = encoder_block(x)
+        # x of shape (batch_size, seq_len, output_emb_size)
+        return x
+
+
+class RNNEncoder(nn.Module):
+    """General-purpose layer for encoding a sequence using a bidirectional RNN.
+
+    Encoded output is the RNN's hidden state at each position, which
+    has shape `(batch_size, seq_len, hidden_size * 2)`.
+
+    Args:
+        input_size (int): Size of a single timestep in the input.
+        hidden_size (int): Size of the RNN hidden state.
+        num_layers (int): Number of layers of RNN cells to use.
+        drop_prob (float): Probability of zero-ing out activations.
+    """
+
+    def __init__(self,
+                 input_size,
+                 hidden_size,
+                 num_layers,
+                 drop_prob=0.):
+        super(RNNEncoder, self).__init__()
+        self.drop_prob = drop_prob
+        self.rnn = nn.LSTM(input_size, hidden_size, num_layers,
+                           batch_first=True,
+                           bidirectional=True,
+                           dropout=drop_prob if num_layers > 1 else 0.)
+
+    def forward(self, x, lengths):
+        # Save original padded length for use by pad_packed_sequence
+        orig_len = x.size(1)
+
+        # Sort by length and pack sequence for RNN
+        lengths, sort_idx = lengths.sort(0, descending=True)
+        x = x[sort_idx]  # (batch_size, seq_len, input_size)
+        x = pack_padded_sequence(x, lengths.cpu(), batch_first=True)
+
+        # Apply RNN
+        x, _ = self.rnn(x)  # (batch_size, seq_len, 2 * hidden_size)
+
+        # Unpack and reverse sort
+        x, _ = pad_packed_sequence(x, batch_first=True, total_length=orig_len)
+        _, unsort_idx = sort_idx.sort(0)
+        x = x[unsort_idx]  # (batch_size, seq_len, 2 * hidden_size)
+
+        # Apply dropout (RNN applies dropout after all but the last layer)
+        x = F.dropout(x, self.drop_prob, self.training)
+
+        return x
+
 
 class BiDAFAttention(nn.Module):
     """Bidirectional attention originally used by BiDAF.
@@ -361,6 +462,7 @@ class BiDAFAttention(nn.Module):
         hidden_size (int): Size of hidden activations.
         drop_prob (float): Probability of zero-ing out activations.
     """
+
     def __init__(self, hidden_size, drop_prob=0.1):
         super(BiDAFAttention, self).__init__()
         self.drop_prob = drop_prob
@@ -374,11 +476,11 @@ class BiDAFAttention(nn.Module):
     def forward(self, c, q, c_mask, q_mask):
         batch_size, c_len, _ = c.size()
         q_len = q.size(1)
-        s = self.get_similarity_matrix(c, q)        # (batch_size, c_len, q_len)
+        s = self.get_similarity_matrix(c, q)  # (batch_size, c_len, q_len)
         c_mask = c_mask.view(batch_size, c_len, 1)  # (batch_size, c_len, 1)
         q_mask = q_mask.view(batch_size, 1, q_len)  # (batch_size, 1, q_len)
-        s1 = masked_softmax(s, q_mask, dim=2)       # (batch_size, c_len, q_len)
-        s2 = masked_softmax(s, c_mask, dim=1)       # (batch_size, c_len, q_len)
+        s1 = masked_softmax(s, q_mask, dim=2)  # (batch_size, c_len, q_len)
+        s2 = masked_softmax(s, c_mask, dim=1)  # (batch_size, c_len, q_len)
 
         # (bs, c_len, q_len) x (bs, q_len, hid_size) => (bs, c_len, hid_size)
         a = torch.bmm(s1, q)
@@ -406,8 +508,8 @@ class BiDAFAttention(nn.Module):
 
         # Shapes: (batch_size, c_len, q_len)
         s0 = torch.matmul(c, self.c_weight).expand([-1, -1, q_len])
-        s1 = torch.matmul(q, self.q_weight).transpose(1, 2)\
-                                           .expand([-1, c_len, -1])
+        s1 = torch.matmul(q, self.q_weight).transpose(1, 2) \
+            .expand([-1, c_len, -1])
         s2 = torch.matmul(c * self.cq_weight, q.transpose(1, 2))
         s = s0 + s1 + s2 + self.bias
 
@@ -427,6 +529,7 @@ class BiDAFOutput(nn.Module):
         hidden_size (int): Hidden size used in the BiDAF model.
         drop_prob (float): Probability of zero-ing out activations.
     """
+
     def __init__(self, hidden_size, drop_prob):
         super(BiDAFOutput, self).__init__()
         self.att_linear_1 = nn.Linear(8 * hidden_size, 1)
