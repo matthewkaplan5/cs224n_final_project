@@ -88,8 +88,7 @@ class CharCNN(nn.Module):
         b = x.shape[0]
         seq_len = x.shape[1]
         # Transpose as middle index must be embedding size (as this is width of conv filter)
-        x = x.view(b * seq_len, x.shape[2], x.shape[3]).transpose(1,
-                                                                  2)  # (batch_size * seq_len, char_emb_size, max_word_len)
+        x = x.view(b * seq_len, x.shape[2], x.shape[3]).transpose(1, 2)  # (batch_size * seq_len, char_emb_size, max_word_len)
 
         x = self.conv_layer(x)  # (batch_size * seq_len, out_channels, conv_out)
 
