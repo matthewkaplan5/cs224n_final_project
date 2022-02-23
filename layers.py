@@ -15,6 +15,33 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from util import masked_softmax
 from util import get_available_devices
 
+if torch.cuda.is_available():
+    device = torch.device('cuda:0')
+else:
+    device = torch.device('cpu')
+
+def position_encoder(x):
+    seq_len = x.shape[1]
+    emb_dim = x.shape[2]
+
+    # First get positions from 1 to sequence length
+    pos = torch.tensor(range(seq_len))
+
+    # Then, get the next term without position multiplied to it. We only want even
+    # columns. Need to use numpy as torch.log only accepts tensors.
+    encoder = torch.exp(np.log(1 / 10000) * (2 * torch.tensor(range(0, emb_dim, 2))) / emb_dim)
+
+    PE = torch.zeros((seq_len, emb_dim))
+    # Now, outer product the position and encoder (of even j) into the odd
+    # and even columns of PE respectively. Then, as described, for
+    # even columns take sin, odd columns take cos.
+    PE[:, range(0, emb_dim, 2)] = torch.sin(torch.outer(pos, encoder))
+    PE[:, range(1, emb_dim, 2)] = torch.cos(torch.outer(pos, encoder))
+
+    PE = PE.to(device)
+
+    return x + PE
+
 
 class Embedding(nn.Module):
     """Embedding layer used by BiDAF, without the character-level component.
@@ -267,9 +294,9 @@ class QANetSelfAttention(nn.Module):
 
     def __init__(self, embedding_dim, num_heads):
         super(QANetSelfAttention, self).__init__()
-        max_seq_len = 1000
-        mask = torch.tril(torch.ones((max_seq_len, max_seq_len)))
-        self.register_buffer('mask', mask, persistent=False)
+        # max_seq_len = 1000
+        # mask = torch.tril(torch.ones((max_seq_len, max_seq_len)))
+        # self.register_buffer('mask', mask, persistent=False)
         self.key_matrix = nn.Linear(embedding_dim, embedding_dim)
         self.query_matrix = nn.Linear(embedding_dim, embedding_dim)
         self.value_matrix = nn.Linear(embedding_dim, embedding_dim)
@@ -282,10 +309,10 @@ class QANetSelfAttention(nn.Module):
         q = self.query_matrix(x)
         v = self.value_matrix(x)
         # Lower triangular mask of ones for value sake.
-        
+        mask = torch.tril(torch.ones((x.shape[1], x.shape[1]))).to(device)
         # We don't need attention weights, just output x (see PyTorch documentation here:
         # https://pytorch.org/docs/stable/generated/torch.nn.MultiheadAttention.html)
-        x = self.attention(query=q, key=k, value=v, need_weights=False, attn_mask=self.mask[:x.shape[1], :x.shape[1]])
+        x = self.attention(query=q, key=k, value=v, need_weights=False, attn_mask=mask)
         # Returns a tuple (x, None)
         return x[0]
 
@@ -330,7 +357,7 @@ class EncoderBlock(nn.Module):
     def __init__(self, num_conv, input_emb_size, output_emb_size, kernel_size, num_heads):
         super(EncoderBlock, self).__init__()
         assert num_conv > 0, 'There must be at least 1 convolution layer in an Encoder Block'
-        self.position_encoder = PositionalEncoding(emb_dim=input_emb_size)
+        # self.position_encoder = PositionalEncoding(emb_dim=input_emb_size)
         self.conv_layers = nn.ModuleList([])
         # First conv layer input --> output.
         self.conv_layers.append(DepthwiseSeparableConvolutions(in_channels=input_emb_size,
@@ -347,7 +374,8 @@ class EncoderBlock(nn.Module):
 
     def forward(self, x):
         # First, add the PositionalEncoding
-        x = x + self.position_encoder(x)
+        # x = x + self.position_encoder(x)
+        x = position_encoder(x)
 
         # First, repeat conv(layernorm(x)) + x for all conv layers
         for conv in self.conv_layers:

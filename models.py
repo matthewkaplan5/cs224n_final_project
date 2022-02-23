@@ -109,7 +109,7 @@ class QANet(nn.Module):
         self.att = layers.BiDAFAttention(hidden_size=hidden_size,
                                          drop_prob=drop_prob)
 
-        self.model_enc = layers.EncoderStack(num_blocks=7,
+        self.model_enc = layers.EncoderStack(num_blocks=5,
                                              num_conv_layers=2,
                                              input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
