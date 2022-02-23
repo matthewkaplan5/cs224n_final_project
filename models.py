@@ -109,17 +109,17 @@ class QANet(nn.Module):
         self.att = layers.BiDAFAttention(hidden_size=hidden_size,
                                          drop_prob=drop_prob)
 
+        self.ffn = layers.ConvFeedForwardNet(embedding_dim=4*hidden_size, hidden_size=6*hidden_size,
+                                             output_size=hidden_size, kernel_size=3)
+
         self.model_enc = layers.EncoderStack(num_blocks=5,
                                              num_conv_layers=2,
                                              input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
-                                             kernel_size=7,
+                                             kernel_size=5,
                                              num_attn_heads=8)
 
         self.out = layers.QANetOutput(input_size=hidden_size)
-
-        # TEMPORARY AS OUTPUT OF ATTN ISN'T HIDDEN SIZE. LOOKING TO ED TO FIX
-        self.temp_size_fix = nn.Linear(4 * hidden_size, hidden_size)
 
     def forward(self, cw_idxs, cc_idxs, qw_idxs, qc_idxs):
         cw_mask = torch.zeros_like(cw_idxs) != cw_idxs
@@ -138,9 +138,7 @@ class QANet(nn.Module):
 
         att = F.dropout(att, p=0.1, training=self.training)
 
-        # REMOVE THIS LATER
-        att = self.temp_size_fix(att)
-        # REMOVE THIS LATER
+        att = self.ffn(att) # (batch_size, c_len, hidden_size)
 
         m_0 = self.model_enc(att) # (batch_size, c_len, hidden_size)
         m_1 = self.model_enc(m_0.clone()) # (batch_size, c_len, hidden_size)
