@@ -126,8 +126,13 @@ class BiDAF(nn.Module):
         c_enc = self.enc(c_emb, c_len)    # (batch_size, c_len, 2 * hidden_size)
         q_enc = self.enc(q_emb, q_len)    # (batch_size, q_len, 2 * hidden_size)
 
+        c_enc = F.dropout(c_enc, p = 0.1, training = self.training)
+        q_enc = F.dropout(q_enc, p = 0.1, training = self.training)
+
         att = self.att(c_enc, q_enc,
                        cw_mask, qw_mask)    # (batch_size, c_len, 8 * hidden_size)
+
+        att = F.dropout(att, p = .1, training = self.training)
 
         mod = self.mod(att, c_len)        # (batch_size, c_len, 2 * hidden_size)
 
