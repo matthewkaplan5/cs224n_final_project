@@ -514,6 +514,33 @@ class BiDAFAttention(nn.Module):
 
         return s
 
+class QANetOutput(nn.Module):
+    """
+    This is the output layer used by the authors of QANet here:
+    https://arxiv.org/pdf/1804.09541.pdf
+
+    We use a linear layer over concatenated inputs before applying
+    a softmax to generate log probabilities (for the nll loss).
+    """
+    def __init__(self, input_size):
+        super(QANetOutput, self).__init__()
+        # From paper, w1 and w2 matrices with concatenated inputs that
+        # we want to send to 1 (so we can squeeze into 2 dimensions)
+        self.w1 = nn.Linear(in_features=2 * input_size, out_features=1)
+        self.w2 = nn.Linear(in_features=2 * input_size, out_features=1)
+
+    def forward(self, m0, m1, m2, mask):
+        # M0, M1, M2 will be of shapes (batch_size, seq_len, input_size)
+        x1 = torch.cat((m0, m1), dim=2)
+        x2 = torch.cat((m0, m2), dim=2)
+
+        x1 = self.w1(x1) # (batch_size, seq_len, 1)
+        x2 = self.w2(x2) # (batch_size, seq_len, 1)
+
+        log_p1 = masked_softmax(x1.squeeze(), mask, log_softmax=True)
+        log_p2 = masked_softmax(x2.squeeze(), mask, log_softmax=True)
+
+        return log_p1, log_p2
 
 class BiDAFOutput(nn.Module):
     """Output layer used by BiDAF for question answering.
