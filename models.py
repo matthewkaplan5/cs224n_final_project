@@ -128,7 +128,12 @@ class QANet(nn.Module):
         c_enc = self.emb_enc_1(c_emb) # (batch_size, c_len, hidden_size)
         q_enc = self.emb_enc_2(q_emb) # (batch_size, q_len, hidden_size)
 
+        c_enc = F.dropout(c_enc, p=0.1, training=self.training)
+        q_enc = F.dropout(q_enc, p=0.1, training=self.training)
+
         att = self.att(c_enc, q_enc, cw_mask, qw_mask)  # (batch_size, c_len, 8 * hidden_size)
+
+        att = F.dropout(att, p=0.1, training=self.training)
 
         m_0 = self.model_enc(att) # (batch_size, c_len, hidden_size)
         m_1 = self.model_enc(m_0.clone()) # (batch_size, c_len, hidden_size)
