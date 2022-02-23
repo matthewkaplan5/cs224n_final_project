@@ -3,7 +3,7 @@
 Usage:
     > python test.py --split SPLIT --load_path PATH --name NAME
     where
-    > SPLIT is either "dev" or "test"
+    > SPLIT is either "train" or "dev" or "test"
     > PATH is a path to a checkpoint (e.g., save/train/model-01/best.pth.tar)
     > NAME is a name to identify the test run
 
