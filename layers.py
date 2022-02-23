@@ -13,6 +13,7 @@ import numpy as np
 
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from util import masked_softmax
+from util import get_available_devices
 
 
 class Embedding(nn.Module):
@@ -157,33 +158,37 @@ class PositionalEncoding(nn.Module):
     = i * exp(log(1 / 10000) * (2j / embedding_dim))
 
     Leverages broadcast summation to add to x.
+
+    We need to build the largest possible position encoder in __init__ and shrink it in the forward
+    function to fit x, otherwise it will not work on cuda to build the positional encoder in the
+    forward function.
     """
 
-    def __init__(self):
+    def __init__(self, emb_dim):
         super(PositionalEncoding, self).__init__()
-
-    def forward(self, x):
-        # Expecting x of 3 dimensions (batch_size, seq_len, embedding_dim)
-        # Note: Embedding Dim must be even.
-        seq_len = x.shape[1]
-        emb_dim = x.shape[2]
+        max_seq_len = 1000
 
         # First get positions from 1 to sequence length
-        pos = torch.tensor(range(seq_len))
+        pos = torch.tensor(range(max_seq_len))
 
         # Then, get the next term without position multiplied to it. We only want even
         # columns. Need to use numpy as torch.log only accepts tensors.
         encoder = torch.exp(np.log(1 / 10000) * (2 * torch.tensor(range(0, emb_dim, 2))) / emb_dim)
 
-        PE = torch.zeros((seq_len, emb_dim))
+        PE = torch.zeros((max_seq_len, emb_dim))
         # Now, outer product the position and encoder (of even j) into the odd
         # and even columns of PE respectively. Then, as described, for
         # even columns take sin, odd columns take cos.
         PE[:, range(0, emb_dim, 2)] = torch.sin(torch.outer(pos, encoder))
         PE[:, range(1, emb_dim, 2)] = torch.cos(torch.outer(pos, encoder))
 
-        # Now, add to x unsqueezing along batch dimension for broadcast sum
-        x = x + PE.unsqueeze(0)  # (batch_size, seq_len, emb_dim) + (1, seq_len, emb_dim)
+        self.register_buffer('PE', PE, persistent=False)
+
+    def forward(self, x):
+
+        # PE is of shape (max_seq_len, emb_dim)
+        # Take part of PE up to actual seq len
+        x = x + self.PE[:x.shape[1], :].unsqueeze(0)  # (batch_size, seq_len, emb_dim) + (1, seq_len, emb_dim)
 
         return x
 
@@ -231,7 +236,7 @@ class DepthwiseSeparableConvolutions(nn.Module):
         # Need in_channel conv filters of 1 channel x width of 7 (the groups argument allows us to alter channels).
         # Explanation for padding in comments above. Implicitly concatenated on channel axis.
         self.depthwise_conv = nn.Conv1d(in_channels=in_channels, out_channels=in_channels,
-                                        kernel_size=kernel_size, padding=(kernel_size - 1) / 2, groups=in_channels)
+                                        kernel_size=kernel_size, padding=int((kernel_size - 1) / 2), groups=in_channels)
         # Further with help from paper, we now have (in_channels x 1) filters. this is
         self.pointwise_conv = nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=1)
 
@@ -262,6 +267,9 @@ class QANetSelfAttention(nn.Module):
 
     def __init__(self, embedding_dim, num_heads):
         super(QANetSelfAttention, self).__init__()
+        max_seq_len = 1000
+        mask = torch.tril(torch.ones((max_seq_len, max_seq_len)))
+        self.register_buffer('mask', mask, persistent=False)
         self.key_matrix = nn.Linear(embedding_dim, embedding_dim)
         self.query_matrix = nn.Linear(embedding_dim, embedding_dim)
         self.value_matrix = nn.Linear(embedding_dim, embedding_dim)
@@ -274,11 +282,12 @@ class QANetSelfAttention(nn.Module):
         q = self.query_matrix(x)
         v = self.value_matrix(x)
         # Lower triangular mask of ones for value sake.
-        mask = torch.tril(torch.ones((x.shape[1], x.shape[2])))
+        
         # We don't need attention weights, just output x (see PyTorch documentation here:
         # https://pytorch.org/docs/stable/generated/torch.nn.MultiheadAttention.html)
-        x = self.attention(query=q, key=k, value=v, need_weights=False, attn_mask=mask)
-        return x
+        x = self.attention(query=q, key=k, value=v, need_weights=False, attn_mask=self.mask[:x.shape[1], :x.shape[1]])
+        # Returns a tuple (x, None)
+        return x[0]
 
 
 class FeedForwardNet(nn.Module):
@@ -289,7 +298,7 @@ class FeedForwardNet(nn.Module):
     """
 
     def __init__(self, embedding_dim, hidden_size):
-        super(FeedForwardNet).__init__()
+        super(FeedForwardNet, self).__init__()
         # Include bias in both linear terms
         self.w1 = nn.Linear(in_features=embedding_dim, out_features=hidden_size)
         self.relu = nn.ReLU()
@@ -321,7 +330,7 @@ class EncoderBlock(nn.Module):
     def __init__(self, num_conv, input_emb_size, output_emb_size, kernel_size, num_heads):
         super(EncoderBlock, self).__init__()
         assert num_conv > 0, 'There must be at least 1 convolution layer in an Encoder Block'
-        self.position_encoder = PositionalEncoding()
+        self.position_encoder = PositionalEncoding(emb_dim=input_emb_size)
         self.conv_layers = nn.ModuleList([])
         # First conv layer input --> output.
         self.conv_layers.append(DepthwiseSeparableConvolutions(in_channels=input_emb_size,
