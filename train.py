@@ -18,6 +18,7 @@ from args import get_train_args
 from collections import OrderedDict
 from json import dumps
 from models import BiDAF
+from models import QANet
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 from ujson import load as json_load
@@ -49,7 +50,7 @@ def main(args):
     log.info('Building model...')
     # This is where we'll need to likely modify code
     # ---------------------------------------------------------------------------
-    model = BiDAF(char_vectors=char_vectors,
+    model = QANet(char_vectors=char_vectors,
                   word_vectors=word_vectors,
                   hidden_size=args.hidden_size,
                   drop_prob=args.drop_prob)
