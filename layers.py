@@ -351,22 +351,22 @@ class EncoderBlock(nn.Module):
 
         # First, repeat conv(layernorm(x)) + x for all conv layers
         for conv in self.conv_layers:
-            out = x.clone()
+            # out = x.clone()
             x = F.layer_norm(x, x.shape[1:])
             x = conv(x)
-            x = x + out
+            # x = x + out
 
         # Now, self_attention(layernorm(x)) + x
-        out = x.clone()
+        #  out = x.clone()
         x = F.layer_norm(x, x.shape[1:])
         x = self.self_attention(x)
-        x = x + out
+        # x = x + out
 
         # Now, feed_forward_net(layernorm(x)) + x
-        out = x.clone()
+        # out = x.clone()
         x = F.layer_norm(x, x.shape[1:])
         x = self.feed_forward_net(x)
-        x = x + out
+        # x = x + out
 
         return x
 
