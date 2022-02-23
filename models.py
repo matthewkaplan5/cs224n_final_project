@@ -89,19 +89,19 @@ class QANet(nn.Module):
         self.emb = layers.Embedding(char_vectors=char_vectors,
                                     word_vectors=word_vectors,
                                     char_emb_size=200,
-                                    hidden_size=500, # Same as QANet Paper
+                                    hidden_size=hidden_size, # Same as QANet Paper
                                     drop_prob=drop_prob)
 
         self.emb_enc_1 = layers.EncoderStack(num_blocks=1,
                                              num_conv_layers=4,
-                                             input_emb_size=500,
+                                             input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
                                              kernel_size=7,
                                              num_attn_heads=8)
 
         self.emb_enc_2 = layers.EncoderStack(num_blocks=1,
                                              num_conv_layers=4,
-                                             input_emb_size=500,
+                                             input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
                                              kernel_size=7,
                                              num_attn_heads=8)
@@ -111,12 +111,15 @@ class QANet(nn.Module):
 
         self.model_enc = layers.EncoderStack(num_blocks=7,
                                              num_conv_layers=2,
-                                             input_emb_size=8 * hidden_size,
+                                             input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
                                              kernel_size=7,
                                              num_attn_heads=8)
 
         self.out = layers.QANetOutput(input_size=hidden_size)
+
+        # TEMPORARY AS OUTPUT OF ATTN ISN'T HIDDEN SIZE. LOOKING TO ED TO FIX
+        self.temp_size_fix = nn.Linear(4 * hidden_size, hidden_size)
 
     def forward(self, cw_idxs, cc_idxs, qw_idxs, qc_idxs):
         cw_mask = torch.zeros_like(cw_idxs) != cw_idxs
@@ -131,9 +134,13 @@ class QANet(nn.Module):
         c_enc = F.dropout(c_enc, p=0.1, training=self.training)
         q_enc = F.dropout(q_enc, p=0.1, training=self.training)
 
-        att = self.att(c_enc, q_enc, cw_mask, qw_mask)  # (batch_size, c_len, 8 * hidden_size)
+        att = self.att(c_enc, q_enc, cw_mask, qw_mask)  # (batch_size, c_len, 4 * hidden_size)
 
         att = F.dropout(att, p=0.1, training=self.training)
+
+        # REMOVE THIS LATER
+        att = self.temp_size_fix(att)
+        # REMOVE THIS LATER
 
         m_0 = self.model_enc(att) # (batch_size, c_len, hidden_size)
         m_1 = self.model_enc(m_0.clone()) # (batch_size, c_len, hidden_size)
