@@ -98,7 +98,7 @@ def get_train_args():
                         help='Number of steps between successive evaluations.')
     parser.add_argument('--lr',
                         type=float,
-                        default=0.5,
+                        default=1e-4,
                         help='Learning rate.')
     parser.add_argument('--l2_wd',
                         type=float,
@@ -131,7 +131,7 @@ def get_train_args():
                         help='Random seed for reproducibility.')
     parser.add_argument('--ema_decay',
                         type=float,
-                        default=0.999,
+                        default=0.9999,
                         help='Decay rate for exponential moving average of parameters.')
 
     args = parser.parse_args()
