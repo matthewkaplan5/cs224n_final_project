@@ -13,13 +13,37 @@ import numpy as np
 
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from util import masked_softmax
-from util import get_available_devices
 
+"""Get appropriate device for cuda support for buffers"""
 if torch.cuda.is_available():
     device = torch.device('cuda:0')
 else:
     device = torch.device('cpu')
 
+"""
+Adds a PositionalEncoding to an input x of shape (batch_size, seq_len, embedding_dim)
+as outlined in Attention is All You Need: https://arxiv.org/pdf/1706.03762.pdf
+
+Namely, constructs a Positional Encoder Matrix of shape (seq_len, embedding_dim) where
+PE_{ij} = sin(i/10000^(2j / embedding_dim)) for even j and
+PE_{ij} = cos(i/10000^(2(j - 1) / embedding_dim)) for odd j
+
+Implementation note:
+For vectorization purposes, we take a vector of i: 0 --> seq_len - 1
+Then we multiply it to exp(log(i/10000^(2(j - 1) / embedding_dim))) as this allows
+us to take away exponent term and use outer product.
+
+To demonstrate, we leverage the fact that:
+i * ((1 / 10000)^(2j / embedding_dim))
+= i * exp(log((1 / 10000)^(2j / embedding_dim)))
+= i * exp(log(1 / 10000) * (2j / embedding_dim))
+
+Leverages broadcast summation to add to x.
+
+We need to build the largest possible position encoder in __init__ and shrink it in the forward
+function to fit x, otherwise it will not work on cuda to build the positional encoder in the
+forward function.
+"""
 def position_encoder(x):
     seq_len = x.shape[1]
     emb_dim = x.shape[2]
@@ -41,7 +65,6 @@ def position_encoder(x):
     PE = PE.to(device)
 
     return x + PE
-
 
 class Embedding(nn.Module):
     """Embedding layer used by BiDAF, without the character-level component.
@@ -164,62 +187,6 @@ class HighwayEncoder(nn.Module):
 
         return x
 
-
-class PositionalEncoding(nn.Module):
-    """
-    Adds a PositionalEncoding to an input x of shape (batch_size, seq_len, embedding_dim)
-    as outlined in Attention is All You Need: https://arxiv.org/pdf/1706.03762.pdf
-
-    Namely, constructs a Positional Encoder Matrix of shape (seq_len, embedding_dim) where
-    PE_{ij} = sin(i/10000^(2j / embedding_dim)) for even j and
-    PE_{ij} = cos(i/10000^(2(j - 1) / embedding_dim)) for odd j
-
-    Implementation note:
-    For vectorization purposes, we take a vector of i: 0 --> seq_len - 1
-    Then we multiply it to exp(log(i/10000^(2(j - 1) / embedding_dim))) as this allows
-    us to take away exponent term and use outer product.
-
-    To demonstrate, we leverage the fact that:
-    i * ((1 / 10000)^(2j / embedding_dim))
-    = i * exp(log((1 / 10000)^(2j / embedding_dim)))
-    = i * exp(log(1 / 10000) * (2j / embedding_dim))
-
-    Leverages broadcast summation to add to x.
-
-    We need to build the largest possible position encoder in __init__ and shrink it in the forward
-    function to fit x, otherwise it will not work on cuda to build the positional encoder in the
-    forward function.
-    """
-
-    def __init__(self, emb_dim):
-        super(PositionalEncoding, self).__init__()
-        max_seq_len = 1000
-
-        # First get positions from 1 to sequence length
-        pos = torch.tensor(range(max_seq_len))
-
-        # Then, get the next term without position multiplied to it. We only want even
-        # columns. Need to use numpy as torch.log only accepts tensors.
-        encoder = torch.exp(np.log(1 / 10000) * (2 * torch.tensor(range(0, emb_dim, 2))) / emb_dim)
-
-        PE = torch.zeros((max_seq_len, emb_dim))
-        # Now, outer product the position and encoder (of even j) into the odd
-        # and even columns of PE respectively. Then, as described, for
-        # even columns take sin, odd columns take cos.
-        PE[:, range(0, emb_dim, 2)] = torch.sin(torch.outer(pos, encoder))
-        PE[:, range(1, emb_dim, 2)] = torch.cos(torch.outer(pos, encoder))
-
-        self.register_buffer('PE', PE, persistent=False)
-
-    def forward(self, x):
-
-        # PE is of shape (max_seq_len, emb_dim)
-        # Take part of PE up to actual seq len
-        x = x + self.PE[:x.shape[1], :].unsqueeze(0)  # (batch_size, seq_len, emb_dim) + (1, seq_len, emb_dim)
-
-        return x
-
-
 class DepthwiseSeparableConvolutions(nn.Module):
     """
     Implements Depthwise Separable Convolutions as outlined by Chollet (2017)
@@ -294,9 +261,6 @@ class QANetSelfAttention(nn.Module):
 
     def __init__(self, embedding_dim, num_heads):
         super(QANetSelfAttention, self).__init__()
-        # max_seq_len = 1000
-        # mask = torch.tril(torch.ones((max_seq_len, max_seq_len)))
-        # self.register_buffer('mask', mask, persistent=False)
         self.key_matrix = nn.Linear(embedding_dim, embedding_dim)
         self.query_matrix = nn.Linear(embedding_dim, embedding_dim)
         self.value_matrix = nn.Linear(embedding_dim, embedding_dim)
@@ -316,6 +280,43 @@ class QANetSelfAttention(nn.Module):
         # Returns a tuple (x, None)
         return x[0]
 
+class ConvFeedForwardNet(nn.Module):
+    """
+    This is a Feed Forward Net that uses 1D Convolutional Networks instead of
+    Linear --> ReLU --> Linear. The architecture is simply 1D ConvNet --> ReLU
+    --> 1D ConvNet. We are going to experiment with both to see if the model
+    trains with greater stability with one or the other. Meant for the Encoder
+    Block in QANet.
+
+    From comment block in DepthwiseSeparableConvolutions class, we see to maintain
+    proper sequence length, padding = (kernel_size - 1) / 2
+    """
+    def __init__(self, embedding_dim, hidden_size, output_size, kernel_size):
+        super(ConvFeedForwardNet, self).__init__()
+        # Kernel Size must be odd to maintain seq_len
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        self.w1 = nn.Conv1d(in_channels=embedding_dim, out_channels=hidden_size,
+                            kernel_size=kernel_size, padding=int((kernel_size - 1) / 2))
+        self.relu = nn.ReLU()
+        self.batch_norm = nn.BatchNorm1d(num_features=hidden_size)
+        self.w2 = nn.Conv1d(in_channels=hidden_size, out_channels=output_size,
+                            kernel_size=kernel_size, padding=int((kernel_size - 1) / 2))
+
+    def forward(self, x):
+        # x shape (batch_size, seq_len, embedding_dim)
+        x = x.transpose(1, 2)
+
+        x = self.w1(x) # (batch_size, hidden_size, seq_len)
+        x = self.relu(x)
+        x = self.batch_norm(x)
+        x = self.w2(x) # (batch_size, output_size, seq_len)
+
+        x = x.transpose(1, 2) # (batch_size, seq_len, output_size)
+
+        return x
+
+
 
 class FeedForwardNet(nn.Module):
     """
@@ -324,12 +325,12 @@ class FeedForwardNet(nn.Module):
     do not explicitly describe the FeedForwardNet, this seems most appropriate.
     """
 
-    def __init__(self, embedding_dim, hidden_size):
+    def __init__(self, embedding_dim, hidden_size, output_size):
         super(FeedForwardNet, self).__init__()
         # Include bias in both linear terms
         self.w1 = nn.Linear(in_features=embedding_dim, out_features=hidden_size)
         self.relu = nn.ReLU()
-        self.w2 = nn.Linear(in_features=hidden_size, out_features=embedding_dim)
+        self.w2 = nn.Linear(in_features=hidden_size, out_features=output_size)
 
     def forward(self, x):
         # (w_1 * x + b_1)
@@ -370,12 +371,13 @@ class EncoderBlock(nn.Module):
                                                                    kernel_size=kernel_size))
         self.self_attention = QANetSelfAttention(embedding_dim=output_emb_size,
                                                  num_heads=num_heads)
-        self.feed_forward_net = FeedForwardNet(embedding_dim=output_emb_size, hidden_size=output_emb_size)
+        self.feed_forward_net = ConvFeedForwardNet(embedding_dim=output_emb_size, hidden_size=output_emb_size,
+                                                   output_size=output_emb_size, kernel_size=3)
 
     def forward(self, x):
         # First, add the PositionalEncoding
-        # x = x + self.position_encoder(x)
-        x = position_encoder(x)
+        x = x + position_encoder(x)
+        # x = position_encoder(x)
 
         # First, repeat conv(layernorm(x)) + x for all conv layers
         for conv in self.conv_layers:
