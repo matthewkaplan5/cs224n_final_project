@@ -64,7 +64,7 @@ def position_encoder(x):
 
     PE = PE.to(device)
 
-    return x + PE
+    return PE
 
 class Embedding(nn.Module):
     """Embedding layer used by BiDAF, without the character-level component.
@@ -261,9 +261,9 @@ class QANetSelfAttention(nn.Module):
 
     def __init__(self, embedding_dim, num_heads):
         super(QANetSelfAttention, self).__init__()
-        self.key_matrix = nn.Linear(embedding_dim, embedding_dim)
-        self.query_matrix = nn.Linear(embedding_dim, embedding_dim)
-        self.value_matrix = nn.Linear(embedding_dim, embedding_dim)
+        self.key_matrix = nn.Linear(embedding_dim, embedding_dim, bias=False)
+        self.query_matrix = nn.Linear(embedding_dim, embedding_dim, bias=False)
+        self.value_matrix = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.attention = nn.MultiheadAttention(embed_dim=embedding_dim, num_heads=num_heads, dropout=.1,
                                                batch_first=True)
 
@@ -279,44 +279,6 @@ class QANetSelfAttention(nn.Module):
         x = self.attention(query=q, key=k, value=v, need_weights=False, attn_mask=mask)
         # Returns a tuple (x, None)
         return x[0]
-
-class ConvFeedForwardNet(nn.Module):
-    """
-    This is a Feed Forward Net that uses 1D Convolutional Networks instead of
-    Linear --> ReLU --> Linear. The architecture is simply 1D ConvNet --> ReLU
-    --> 1D ConvNet. We are going to experiment with both to see if the model
-    trains with greater stability with one or the other. Meant for the Encoder
-    Block in QANet.
-
-    From comment block in DepthwiseSeparableConvolutions class, we see to maintain
-    proper sequence length, padding = (kernel_size - 1) / 2
-    """
-    def __init__(self, embedding_dim, hidden_size, output_size, kernel_size):
-        super(ConvFeedForwardNet, self).__init__()
-        # Kernel Size must be odd to maintain seq_len
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        self.w1 = nn.Conv1d(in_channels=embedding_dim, out_channels=hidden_size,
-                            kernel_size=kernel_size, padding=int((kernel_size - 1) / 2))
-        self.relu = nn.ReLU()
-        self.batch_norm = nn.BatchNorm1d(num_features=hidden_size)
-        self.w2 = nn.Conv1d(in_channels=hidden_size, out_channels=output_size,
-                            kernel_size=kernel_size, padding=int((kernel_size - 1) / 2))
-
-    def forward(self, x):
-        # x shape (batch_size, seq_len, embedding_dim)
-        x = x.transpose(1, 2)
-
-        x = self.w1(x) # (batch_size, hidden_size, seq_len)
-        x = self.relu(x)
-        x = self.batch_norm(x)
-        x = self.w2(x) # (batch_size, output_size, seq_len)
-
-        x = x.transpose(1, 2) # (batch_size, seq_len, output_size)
-
-        return x
-
-
 
 class FeedForwardNet(nn.Module):
     """
@@ -355,7 +317,8 @@ class EncoderBlock(nn.Module):
     functions f, we perform f(layernorm(x)) + x
     """
 
-    def __init__(self, num_conv, input_emb_size, output_emb_size, kernel_size, num_heads):
+    def __init__(self, num_conv, input_emb_size, output_emb_size, kernel_size, num_heads,
+                 ffn_hidden_size):
         super(EncoderBlock, self).__init__()
         assert num_conv > 0, 'There must be at least 1 convolution layer in an Encoder Block'
         # self.position_encoder = PositionalEncoding(emb_dim=input_emb_size)
@@ -371,32 +334,31 @@ class EncoderBlock(nn.Module):
                                                                    kernel_size=kernel_size))
         self.self_attention = QANetSelfAttention(embedding_dim=output_emb_size,
                                                  num_heads=num_heads)
-        self.feed_forward_net = ConvFeedForwardNet(embedding_dim=output_emb_size, hidden_size=output_emb_size,
-                                                   output_size=output_emb_size, kernel_size=3)
+        self.feed_forward_net = FeedForwardNet(embedding_dim=output_emb_size, hidden_size=ffn_hidden_size,
+                                               output_size=output_emb_size)
 
     def forward(self, x):
         # First, add the PositionalEncoding
-        x = x + position_encoder(x)
-        # x = position_encoder(x)
+        x += position_encoder(x)
 
         # First, repeat conv(layernorm(x)) + x for all conv layers
         for conv in self.conv_layers:
-            # out = x.clone()
+            out = x.clone()
             x = F.layer_norm(x, x.shape[1:])
             x = conv(x)
-            # x = x + out
+            x = x + out
 
         # Now, self_attention(layernorm(x)) + x
-        #  out = x.clone()
+        out = x.clone()
         x = F.layer_norm(x, x.shape[1:])
         x = self.self_attention(x)
-        # x = x + out
+        x = x + out
 
         # Now, feed_forward_net(layernorm(x)) + x
-        # out = x.clone()
+        out = x.clone()
         x = F.layer_norm(x, x.shape[1:])
         x = self.feed_forward_net(x)
-        # x = x + out
+        x = x + out
 
         return x
 
@@ -409,7 +371,7 @@ class EncoderStack(nn.Module):
     """
 
     def __init__(self, num_blocks, num_conv_layers, input_emb_size, output_emb_size,
-                 kernel_size, num_attn_heads):
+                 kernel_size, num_attn_heads, ffn_hidden_size):
         super(EncoderStack, self).__init__()
         assert num_blocks > 0, 'There must be at least 1 block i the Embedding Encoder Stack'
         self.encoder_blocks = nn.ModuleList([])
@@ -417,13 +379,15 @@ class EncoderStack(nn.Module):
                                                 input_emb_size=input_emb_size,
                                                 output_emb_size=output_emb_size,
                                                 kernel_size=kernel_size,
-                                                num_heads=num_attn_heads))
+                                                num_heads=num_attn_heads,
+                                                ffn_hidden_size=ffn_hidden_size))
         for i in range(num_blocks - 1):
             self.encoder_blocks.append(EncoderBlock(num_conv=num_conv_layers,
                                                     input_emb_size=output_emb_size,
                                                     output_emb_size=output_emb_size,
                                                     kernel_size=kernel_size,
-                                                    num_heads=num_attn_heads))
+                                                    num_heads=num_attn_heads,
+                                                    ffn_hidden_size=ffn_hidden_size))
 
     def forward(self, x):
         # x of shape (batch_size, seq_len, input_emb_size)
@@ -565,8 +529,8 @@ class QANetOutput(nn.Module):
         super(QANetOutput, self).__init__()
         # From paper, w1 and w2 matrices with concatenated inputs that
         # we want to send to 1 (so we can squeeze into 2 dimensions)
-        self.w1 = nn.Linear(in_features=2 * input_size, out_features=1)
-        self.w2 = nn.Linear(in_features=2 * input_size, out_features=1)
+        self.w1 = nn.Linear(in_features=2 * input_size, out_features=1, bias=False)
+        self.w2 = nn.Linear(in_features=2 * input_size, out_features=1, bias=False)
 
     def forward(self, m0, m1, m2, mask):
         # M0, M1, M2 will be of shapes (batch_size, seq_len, input_size)
@@ -576,10 +540,10 @@ class QANetOutput(nn.Module):
         x1 = self.w1(x1) # (batch_size, seq_len, 1)
         x2 = self.w2(x2) # (batch_size, seq_len, 1)
 
-        log_p1 = masked_softmax(x1.squeeze(), mask, log_softmax=True)
-        log_p2 = masked_softmax(x2.squeeze(), mask, log_softmax=True)
+        p1 = masked_softmax(x1.squeeze(), mask, log_softmax=True)
+        p2 = masked_softmax(x2.squeeze(), mask, log_softmax=True)
 
-        return log_p1, log_p2
+        return p1, p2
 
 class BiDAFOutput(nn.Module):
     """Output layer used by BiDAF for question answering.

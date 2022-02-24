@@ -61,15 +61,15 @@ class BiDAF(nn.Module):
 
         c_emb = self.emb(cc_idxs, cw_idxs)         # (batch_size, c_len, hidden_size)
         q_emb = self.emb(qc_idxs, qw_idxs)         # (batch_size, q_len, hidden_size)
-
+        print('Embedding: {}'.format(c_emb))
         c_enc = self.enc(c_emb, c_len)    # (batch_size, c_len, 2 * hidden_size)
         q_enc = self.enc(q_emb, q_len)    # (batch_size, q_len, 2 * hidden_size)
-
+        print('Encoder1: {}'.format(c_enc))
         att = self.att(c_enc, q_enc,
                        cw_mask, qw_mask)    # (batch_size, c_len, 8 * hidden_size)
-
+        print('Attention: {}'.format(att))
         mod = self.mod(att, c_len)        # (batch_size, c_len, 2 * hidden_size)
-
+        print('Encoder2: {}'.format(mod))
         out = self.out(att, mod, cw_mask)  # 2 tensors, each (batch_size, c_len)
 
         return out
@@ -97,27 +97,30 @@ class QANet(nn.Module):
                                              input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
                                              kernel_size=7,
-                                             num_attn_heads=8)
+                                             num_attn_heads=8,
+                                             ffn_hidden_size=1024)
 
         self.emb_enc_2 = layers.EncoderStack(num_blocks=1,
                                              num_conv_layers=4,
                                              input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
                                              kernel_size=7,
-                                             num_attn_heads=8)
+                                             num_attn_heads=8,
+                                             ffn_hidden_size=1024)
 
         self.att = layers.BiDAFAttention(hidden_size=hidden_size,
                                          drop_prob=drop_prob)
 
-        self.ffn = layers.ConvFeedForwardNet(embedding_dim=4*hidden_size, hidden_size=6*hidden_size,
-                                             output_size=hidden_size, kernel_size=3)
+        self.ffn = layers.FeedForwardNet(embedding_dim=4*hidden_size, hidden_size=1024,
+                                         output_size=hidden_size)
 
         self.model_enc = layers.EncoderStack(num_blocks=5,
                                              num_conv_layers=2,
                                              input_emb_size=hidden_size,
                                              output_emb_size=hidden_size,
                                              kernel_size=5,
-                                             num_attn_heads=8)
+                                             num_attn_heads=8,
+                                             ffn_hidden_size=1024)
 
         self.out = layers.QANetOutput(input_size=hidden_size)
 
@@ -141,6 +144,7 @@ class QANet(nn.Module):
         att = self.ffn(att) # (batch_size, c_len, hidden_size)
 
         m_0 = self.model_enc(att) # (batch_size, c_len, hidden_size)
+
         m_1 = self.model_enc(m_0.clone()) # (batch_size, c_len, hidden_size)
         m_2 = self.model_enc(m_1.clone()) # (batch_size, c_len, hidden_size)
 
