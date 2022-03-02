@@ -20,6 +20,156 @@ if torch.cuda.is_available():
 else:
     device = torch.device('cpu')
 
+# ------------------------------------------------------------------------------------------------------- #
+# R-Net Related Layers
+class RNetEmbeddings(nn.Module):
+    """
+    Runs a bi-directional recurrent neural network (RNN) over the character
+    embeddings as the input. Concatenates the resulting RNN
+    https://www.microsoft.com/en-us/research/wp-content/uploads/2017/05/r-net.pdf
+
+    Note, that according to the paper it seems the same model is used for both
+    the context and the question.
+    """
+    def __init__(self, char_vectors, word_vectors, hidden_size,
+                 num_layers, drop_prob):
+        super(RNetEmbeddings, self).__init__()
+        self.word_embed = nn.Embedding.from_pretrained(word_vectors)
+        self.char_embed = nn.Embedding.from_pretrained(char_vectors)
+        self.char_rnn = nn.GRU(input_size=char_vectors.shape[1],
+                               hidden_size=hidden_size,
+                               num_layers=num_layers,
+                               batch_first=True,
+                               dropout=drop_prob,
+                               bidirectional=True)
+
+    def forward(self, char, word):
+
+        word_emb = self.word_embed(word) # word_emb is of shape (N, seq_len, word_emb_dim)
+        char_emb = self.char_embed(char) # char_emb is of shape (N, seq_len, word_len, char_emb_dim)
+
+        N = char_emb.shape[0]
+        seq_len = char_emb.shape[1]
+
+        # Now reshape to (N * seq_len, word_len, emb_dim)
+        char_emb = char_emb.view(char_emb.shape[0] * char_emb.shape[1], char_emb.shape[2], char_emb.shape[3])
+        _, hidden_out = self.char_rnn(char_emb) # Hidden Out: (2 * num_layers, N * seq_len, hidden_size)
+
+        hidden_out = hidden_out.transpose(0, 1) # (N * seq_len, 2 * num_layers, hidden_size)
+        # Reshape to (N * seq_len, 2 * num_layers * hidden_size)
+        hidden_out = hidden_out.view(hidden_out.shape[0], hidden_out.shape[1] * hidden_out.shape[2])
+        # Reshape to (N, seq_len, 2 * num_layers * hidden_size)
+        hidden_out = hidden_out.view(N, seq_len, -1)
+
+        # Concatenate to word embeddings
+        emb = torch.cat((word_emb, hidden_out), dim=2)
+
+        return emb
+
+class GRUEncoder(nn.Module):
+    """
+    General-purpose layer for encoding a sequence using a bidirectional RNN.
+
+    Encoded output is the RNN's hidden state at each position, which
+    has shape `(batch_size, seq_len, hidden_size * 2)`.
+
+    Used in the Question and Passage Encoder here:
+    https://www.microsoft.com/en-us/research/wp-content/uploads/2017/05/r-net.pdf
+    """
+
+    def __init__(self, input_size, hidden_size, num_layers, drop_prob):
+        super(GRUEncoder, self).__init__()
+
+        self.drop_prob = drop_prob
+
+        self.gru = nn.GRU(input_size=input_size,
+                          hidden_size=hidden_size,
+                          num_layers=num_layers,
+                          batch_first=True,
+                          dropout=drop_prob,
+                          bidirectional=True)
+
+    def forward(self, x, lengths):
+        # Save original padded length for use by pad_packed_sequence
+        orig_len = x.size(1)
+
+        # Sort by length and pack sequence for RNN
+        lengths, sort_idx = lengths.sort(0, descending=True)
+        x = x[sort_idx]  # (batch_size, seq_len, input_size)
+        x = pack_padded_sequence(x, lengths.cpu(), batch_first=True)
+
+        # Apply RNN
+        x, _ = self.gru(x)  # (batch_size, seq_len, 2 * hidden_size)
+
+        # Unpack and reverse sort
+        x, _ = pad_packed_sequence(x, batch_first=True, total_length=orig_len)
+        _, unsort_idx = sort_idx.sort(0)
+        x = x[unsort_idx]  # (batch_size, seq_len, 2 * hidden_size)
+
+        # Apply dropout (RNN applies dropout after all but the last layer)
+        x = F.dropout(x, self.drop_prob, self.training)
+
+        return x
+
+class GatedAttentionBasedRNN(nn.Module):
+    """
+    This class implementes the Gated Attention-Based Recurrent Networks section 3.2 of the R-Net
+    paper here:
+    https://www.microsoft.com/en-us/research/wp-content/uploads/2017/05/r-net.pdf
+
+    One of the downsides of this layer is given that it is a function of time, a for loop is necessary.
+    Otherwise, all elements within the for loop are vectorized.
+
+    Will return v_t^P given vectors u_t^Q and u_t^P which are outputs of the question and passage encoder
+    respectively.
+    """
+
+    def __init__(self, hidden_size, num_layers, drop_prob):
+        super(GatedAttentionBasedRNN, self).__init__()
+
+        # 2 * hidden_size because RNN is bidirectional.
+        self.question_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.context_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.attn_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.v_t = nn.Linear(2 * hidden_size, 1, bias=False)
+
+        self.tanh = nn.Tanh()
+        self.drop_prob = drop_prob
+
+        self.gru = nn.GRU(input_size=2 * hidden_size,
+                          hidden_size=hidden_size,
+                          num_layers=num_layers,
+                          batch_first=True,
+                          dropout=drop_prob,
+                          bidirectional=True)
+
+    def forward(self, q_emb, c_emb):
+        # q_emb shape: (batch_size, q_len, 2 * hidden_size)
+        # c_emb shape: (batch_size, c_len, 2 * hidden_size)
+        c_len = c_emb.shape[1]
+        # Final embedding shape of context
+        emb = torch.zeros_like(c_emb) # (batch_size, c_len, 2 * hidden_size)
+        w_q = self.question_proj(q_emb) # (batch_size, q_len, 2 * hidden_size)
+        att = torch.zeros_like(c_emb[:, 0, :])
+        for step in range(c_len):
+            w_passage = self.context_proj(c_emb[:, step, :]).unsqueeze(1) # (batch_size, 1, 2 * hidden-size)
+            w_att = self.attn_proj(att).unsqueeze(1) # (batch_size, 1, 2 * hidden_size)
+            s = w_q + w_passage + w_att # (batch_size, q_len, 2 * hidden_size)
+            s = self.tanh(s)
+            s = self.v_t(s).squeeze(dim=2) # (batch_size, q_len)
+            s = F.softmax(s, dim=1)
+            s = s.unsqueeze(1) # (batch_size, 1, q_len)
+            # (batch_size, 1, q_len) x (batch_size, q_len, x) --> (batch_size, 1, x)
+            s = torch.bmm(s, q_emb)
+            att = self.gru(s) # (batch_size, 1, 2 * hidden_size)
+            att = att.squeeze(dim=1) # (batch_size, 2 * hidden_size)
+            emb[:, step, :] = att
+        return emb
+
+# ------------------------------------------------------------------------------------------------------- #
+
+# ------------------------------------------------------------------------------------------------------- #
+# QANet Related Layers
 """
 Adds a PositionalEncoding to an input x of shape (batch_size, seq_len, embedding_dim)
 as outlined in Attention is All You Need: https://arxiv.org/pdf/1706.03762.pdf
@@ -396,7 +546,38 @@ class EncoderStack(nn.Module):
         # x of shape (batch_size, seq_len, output_emb_size)
         return x
 
+class QANetOutput(nn.Module):
+    """
+    This is the output layer used by the authors of QANet here:
+    https://arxiv.org/pdf/1804.09541.pdf
 
+    We use a linear layer over concatenated inputs before applying
+    a softmax to generate log probabilities (for the nll loss).
+    """
+    def __init__(self, input_size):
+        super(QANetOutput, self).__init__()
+        # From paper, w1 and w2 matrices with concatenated inputs that
+        # we want to send to 1 (so we can squeeze into 2 dimensions)
+        self.w1 = nn.Linear(in_features=2 * input_size, out_features=1, bias=False)
+        self.w2 = nn.Linear(in_features=2 * input_size, out_features=1, bias=False)
+
+    def forward(self, m0, m1, m2, mask):
+        # M0, M1, M2 will be of shapes (batch_size, seq_len, input_size)
+        x1 = torch.cat((m0, m1), dim=2)
+        x2 = torch.cat((m0, m2), dim=2)
+
+        x1 = self.w1(x1) # (batch_size, seq_len, 1)
+        x2 = self.w2(x2) # (batch_size, seq_len, 1)
+
+        p1 = masked_softmax(x1.squeeze(), mask, log_softmax=True)
+        p2 = masked_softmax(x2.squeeze(), mask, log_softmax=True)
+
+        return p1, p2
+
+# ------------------------------------------------------------------------------------------------------- #
+
+# ------------------------------------------------------------------------------------------------------- #
+# BiDAF Related Layers (BiDAF Attention used by QANet)
 class RNNEncoder(nn.Module):
     """General-purpose layer for encoding a sequence using a bidirectional RNN.
 
@@ -517,34 +698,6 @@ class BiDAFAttention(nn.Module):
 
         return s
 
-class QANetOutput(nn.Module):
-    """
-    This is the output layer used by the authors of QANet here:
-    https://arxiv.org/pdf/1804.09541.pdf
-
-    We use a linear layer over concatenated inputs before applying
-    a softmax to generate log probabilities (for the nll loss).
-    """
-    def __init__(self, input_size):
-        super(QANetOutput, self).__init__()
-        # From paper, w1 and w2 matrices with concatenated inputs that
-        # we want to send to 1 (so we can squeeze into 2 dimensions)
-        self.w1 = nn.Linear(in_features=2 * input_size, out_features=1, bias=False)
-        self.w2 = nn.Linear(in_features=2 * input_size, out_features=1, bias=False)
-
-    def forward(self, m0, m1, m2, mask):
-        # M0, M1, M2 will be of shapes (batch_size, seq_len, input_size)
-        x1 = torch.cat((m0, m1), dim=2)
-        x2 = torch.cat((m0, m2), dim=2)
-
-        x1 = self.w1(x1) # (batch_size, seq_len, 1)
-        x2 = self.w2(x2) # (batch_size, seq_len, 1)
-
-        p1 = masked_softmax(x1.squeeze(), mask, log_softmax=True)
-        p2 = masked_softmax(x2.squeeze(), mask, log_softmax=True)
-
-        return p1, p2
-
 class BiDAFOutput(nn.Module):
     """Output layer used by BiDAF for question answering.
 
@@ -583,3 +736,5 @@ class BiDAFOutput(nn.Module):
         log_p2 = masked_softmax(logits_2.squeeze(), mask, log_softmax=True)
 
         return log_p1, log_p2
+
+# ------------------------------------------------------------------------------------------------------- #
