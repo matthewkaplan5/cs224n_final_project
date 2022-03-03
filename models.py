@@ -74,6 +74,66 @@ class BiDAF(nn.Module):
 
         return out
 
+class RNet(nn.Module):
+    """
+    The R-Net model as originally written by Microsoft Research Asia:
+    https://www.microsoft.com/en-us/research/wp-content/uploads/2017/05/r-net.pdf
+    """
+
+    def __init__(self, char_vectors, word_vectors, hidden_size, batch_size, drop_prob=0.1):
+        super(RNet, self).__init__()
+
+        self.emb = layers.RNetEmbeddings(char_vectors=char_vectors,
+                                         word_vectors=word_vectors,
+                                         hidden_size=hidden_size,
+                                         num_layers=1,
+                                         drop_prob=0)
+
+        self.birnn_q = layers.GRUEncoder(input_size=word_vectors.shape[1] + (2 * 1 * hidden_size),
+                                         hidden_size=hidden_size,
+                                         num_layers=3,
+                                         drop_prob=drop_prob)
+
+        self.birnn_p = layers.GRUEncoder(input_size=word_vectors.shape[1] + (2 * 1 * hidden_size),
+                                         hidden_size=hidden_size,
+                                         num_layers=3,
+                                         drop_prob=drop_prob)
+
+        self.gated_rnn = layers.GatedAttentionBasedRNN(hidden_size=hidden_size,
+                                                       num_layers=3,
+                                                       drop_prob=drop_prob)
+
+        self.self_matching = layers.SelfMatchingAttention(hidden_size=hidden_size,
+                                                          num_layers=3,
+                                                          drop_prob=drop_prob)
+
+        self.out = layers.RNetOutput(batch_size=batch_size,
+                                     hidden_size=hidden_size,
+                                     num_layers=3,
+                                     drop_prob=drop_prob)
+
+    def forward(self, cw_idxs, cc_idxs, qw_idxs, qc_idxs):
+        cw_mask = torch.zeros_like(cw_idxs) != cw_idxs
+        qw_mask = torch.zeros_like(qw_idxs) != qw_idxs
+        c_len, q_len = cw_mask.sum(-1), qw_mask.sum(-1)
+
+        c_emb = self.emb(cc_idxs, cw_idxs) # (batch_size, c_len, word_vector_shape + (2 * 1 * hidden_size))
+        q_emb = self.emb(qc_idxs, qw_idxs) # (batch_size, q_len, word_vector_shape + (2 * 1 * hidden_size))
+
+        q_emb = self.birnn_q(q_emb, q_len) # (batch_size, q_len, 2 * hidden_size)
+        c_emb = self.birnn_p(c_emb, c_len) # (batch_size, c_len, 2 * hidden_size)
+
+        q_emb_ = q_emb.clone()
+
+        emb = self.gated_rnn(q_emb, c_emb) # (batch_size, c_len, 2 * hidden_size)
+
+        emb = self.self_matching(emb, c_len) # (batch_size, c_len, 2 * hidden_size)
+
+        out = self.out(emb, q_emb_, cw_mask)
+
+        return out
+
+
 class QANet(nn.Module):
     """
     The QANet Model Paper as originally written by Yu et al. 2018

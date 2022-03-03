@@ -17,8 +17,7 @@ import util
 from args import get_train_args
 from collections import OrderedDict
 from json import dumps
-from models import BiDAF
-from models import QANet
+from models import BiDAF, QANet, RNet
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 from ujson import load as json_load
@@ -50,10 +49,11 @@ def main(args):
     log.info('Building model...')
     # This is where we'll need to likely modify code
     # ---------------------------------------------------------------------------
-    model = QANet(char_vectors=char_vectors,
-                  word_vectors=word_vectors,
-                  hidden_size=args.hidden_size,
-                  drop_prob=args.drop_prob)
+    model = RNet(char_vectors=char_vectors,
+                 word_vectors=word_vectors,
+                 hidden_size=args.hidden_size,
+                 batch_size=args.batch_size,
+                 drop_prob=args.drop_prob)
     # ----------------------------------------------------------------------------
     model = nn.DataParallel(model, args.gpu_ids)
     if args.load_path:

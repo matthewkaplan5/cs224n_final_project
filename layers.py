@@ -53,16 +53,16 @@ class RNetEmbeddings(nn.Module):
 
         # Now reshape to (N * seq_len, word_len, emb_dim)
         char_emb = char_emb.view(char_emb.shape[0] * char_emb.shape[1], char_emb.shape[2], char_emb.shape[3])
-        _, hidden_out = self.char_rnn(char_emb) # Hidden Out: (2 * num_layers, N * seq_len, hidden_size)
+        _, char_emb = self.char_rnn(char_emb) # Hidden Out: (2 * num_layers, N * seq_len, hidden_size)
 
-        hidden_out = hidden_out.transpose(0, 1) # (N * seq_len, 2 * num_layers, hidden_size)
+        char_emb = char_emb.transpose(0, 1) # (N * seq_len, 2 * num_layers, hidden_size)
         # Reshape to (N * seq_len, 2 * num_layers * hidden_size)
-        hidden_out = hidden_out.view(hidden_out.shape[0], hidden_out.shape[1] * hidden_out.shape[2])
+        char_emb = char_emb.reshape(char_emb.shape[0], char_emb.shape[1] * char_emb.shape[2])
         # Reshape to (N, seq_len, 2 * num_layers * hidden_size)
-        hidden_out = hidden_out.view(N, seq_len, -1)
+        char_emb = char_emb.view(N, seq_len, -1)
 
         # Concatenate to word embeddings
-        emb = torch.cat((word_emb, hidden_out), dim=2)
+        emb = torch.cat((word_emb, char_emb), dim=2)
 
         return emb
 
@@ -127,16 +127,22 @@ class GatedAttentionBasedRNN(nn.Module):
     def __init__(self, hidden_size, num_layers, drop_prob):
         super(GatedAttentionBasedRNN, self).__init__()
 
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
+
         # 2 * hidden_size because RNN is bidirectional.
         self.question_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
         self.context_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
         self.attn_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.gate_proj = nn.Linear(4 * hidden_size, 4 * hidden_size, bias=False)
         self.v_t = nn.Linear(2 * hidden_size, 1, bias=False)
 
         self.tanh = nn.Tanh()
+        self.sigmoid = nn.Sigmoid()
+
         self.drop_prob = drop_prob
 
-        self.gru = nn.GRU(input_size=2 * hidden_size,
+        self.gru = nn.GRU(input_size=4 * hidden_size,
                           hidden_size=hidden_size,
                           num_layers=num_layers,
                           batch_first=True,
@@ -147,24 +153,136 @@ class GatedAttentionBasedRNN(nn.Module):
         # q_emb shape: (batch_size, q_len, 2 * hidden_size)
         # c_emb shape: (batch_size, c_len, 2 * hidden_size)
         c_len = c_emb.shape[1]
+        q_len = q_emb.shape[1]
         # Final embedding shape of context
         emb = torch.zeros_like(c_emb) # (batch_size, c_len, 2 * hidden_size)
-        w_q = self.question_proj(q_emb) # (batch_size, q_len, 2 * hidden_size)
-        att = torch.zeros_like(c_emb[:, 0, :])
+        # Zeros like c_emb but with different shape
+        h = torch.zeros((2 * self.num_layers, c_emb.shape[0], self.hidden_size),
+                        dtype=c_emb.dtype, layout=c_emb.layout, device=c_emb.device)
+        w_passage = self.context_proj(c_emb) # (batch_size, c_len, 2 * hidden_size)
+        w_q = self.question_proj(q_emb).unsqueeze(1).repeat(1, c_len, 1, 1) # (batch_size, c_len, q_len, 2 * hidden_size)
+        w_passage = w_q + w_passage.unsqueeze(2) # (N, c_len, q_len, x) + (N, c_len, 1, x)
+        att = torch.zeros_like(c_emb[:, 0, :]) # (batch_size, 2 * hidden_size)
         for step in range(c_len):
-            w_passage = self.context_proj(c_emb[:, step, :]).unsqueeze(1) # (batch_size, 1, 2 * hidden-size)
-            w_att = self.attn_proj(att).unsqueeze(1) # (batch_size, 1, 2 * hidden_size)
-            s = w_q + w_passage + w_att # (batch_size, q_len, 2 * hidden_size)
+            passage = c_emb[:, step, :] # (batch_size, 2 * hidden_size)
+            s = self.attn_proj(att).unsqueeze(1) # (batch_size, 1, 2 * hidden_size)
+            s = w_passage[:, step, :, :] + s # (batch_size, q_len, 2 * hidden_size)
             s = self.tanh(s)
             s = self.v_t(s).squeeze(dim=2) # (batch_size, q_len)
             s = F.softmax(s, dim=1)
             s = s.unsqueeze(1) # (batch_size, 1, q_len)
-            # (batch_size, 1, q_len) x (batch_size, q_len, x) --> (batch_size, 1, x)
+            # (batch_size, 1, q_len) x (batch_size, q_len, 2 * hidden_size) --> (batch_size, 1, 2 * hidden_size)
             s = torch.bmm(s, q_emb)
-            att = self.gru(s) # (batch_size, 1, 2 * hidden_size)
+            # Rocktaschel et al 2015 we send s through the gru at this point, but
+            # Wang & Jiang 2016 we take passage and add passage as additional input with gate
+            s_concat = torch.cat((passage.unsqueeze(1), s), dim=2) # (batch_size, 1, 4 * hidden_size)
+            s = self.gate_proj(s_concat) # (W_g[u_t^P, c_t])
+            s = self.sigmoid(s)
+            s = torch.mul(s, s_concat) # (batch_size, 1, 4 * hidden_size) for both element-wise
+            att, h = self.gru(s, h) # (batch_size, 1, 2 * hidden_size)
             att = att.squeeze(dim=1) # (batch_size, 2 * hidden_size)
             emb[:, step, :] = att
+
+        # No dropout on last layer
+        emb = F.dropout(emb, self.drop_prob, self.training)
+
         return emb
+
+class SelfMatchingAttention(nn.Module):
+    """
+    This implements the Self-Matching Attention layer of R-Net as described at this paper:
+    https://www.microsoft.com/en-us/research/wp-content/uploads/2017/05/r-net.pdf
+
+    Since this does not use output of GRU as part of attention computation we can fully vectorize.
+    """
+    def __init__(self, hidden_size, num_layers, drop_prob):
+        super(SelfMatchingAttention, self).__init__()
+        self.passage_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.time_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.gate_proj = nn.Linear(4 * hidden_size, 4 * hidden_size, bias=False)
+        self.v_t = nn.Linear(2 * hidden_size, 1, bias=False)
+
+        self.tanh = nn.Tanh()
+        self.sigmoid = nn.Sigmoid()
+
+        self.gru = GRUEncoder(input_size=4 * hidden_size,
+                              hidden_size=hidden_size,
+                              num_layers=num_layers,
+                              drop_prob=drop_prob)
+
+    def forward(self, emb, lengths):
+        # emb is of shape (N, c_len, 2 * hidden_size)
+        c_len = emb.shape[1]
+        # Reshape to (N, c_len, c_len, 2 * hidden_size) where every array along dimension 1 is the same
+        x = emb.unsqueeze(1).repeat(1, c_len, 1, 1)
+        x = self.passage_proj(x)
+        emb_t_proj = self.time_proj(emb).unsqueeze(2) # (N, c_len, 1, 2 * hidden_size)
+        # Broadcast sum along dim 2
+        x = x + emb_t_proj # (N, c_len, c_len, 2 * hidden_size)
+        x = self.tanh(x)
+        x = self.v_t(x).squeeze(dim=3) # (N, c_len, c_len)
+        x = F.softmax(x, dim=2)
+        # (N, c_len, c_len) x (N, c_len, 2 * hidden_size) --> (N, c_len, 2 * hidden_size)
+        x = torch.bmm(x, emb) # (N, c_len, 2 * hidden_size)
+        x_concat = torch.cat((emb, x), dim=2) # (N, c_len, 4 * hidden_size)
+        x = self.gate_proj(x_concat)
+        x = self.sigmoid(x)
+        x = torch.mul(x, x_concat)
+
+        x = self.gru(x, lengths) # (N, c_len, 2 * hidden_size)
+
+        return x
+
+class RNetOutput(nn.Module):
+    """
+    Computes the output layer for the R-Net model as described here:
+    https://www.microsoft.com/en-us/research/wp-content/uploads/2017/05/r-net.pdf
+    """
+    def __init__(self, batch_size, hidden_size, num_layers, drop_prob):
+        super(RNetOutput, self).__init__()
+        self.v_r_q = nn.Parameter(torch.zeros((batch_size, 1, 2 * hidden_size)))
+        torch.nn.init.xavier_uniform_(self.v_r_q)
+
+        self.w_u = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.w_v = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.w_h_p = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.w_h_a = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.v_t = nn.Linear(2 * hidden_size, 1, bias=False)
+
+        self.tanh = nn.Tanh()
+
+        self.gru = nn.GRU(input_size=2 * hidden_size,
+                          hidden_size=hidden_size,
+                          num_layers=num_layers,
+                          batch_first=True,
+                          dropout=drop_prob,
+                          bidirectional=True)
+
+    def forward(self, h_emb, q_emb, mask):
+        # h_emb (batch_size, c_len, 2 * hidden_size)
+        # q_emb (batch_size, q_len, 2 * hidden_size)
+        x = self.w_u(q_emb) + self.w_v(self.v_r_q) # (batch_size, q_len, 2 * hidden_size)
+        x = self.tanh(x)
+        x = self.v_t(x).squeeze(2) # (batch_size, q_len)
+        x = F.softmax(x, dim=1)
+        x = x.unsqueeze(1) # (batch_size, 1, q_len)
+        # (batch_size, 1, q_len) x (batch_size, q_len, 2 * hidden_size) --> (batch_size, 1, 2 * hidden_size)
+        x = torch.bmm(x, q_emb)
+
+        x = self.w_h_p(h_emb) + self.w_h_a(x) # (batch_size, c_len, 2 * hidden_size)
+        x = self.tanh(x)
+        x = self.v_t(x).squeeze(2) # (batch_size, c_len)
+        p1 = masked_softmax(x, mask, log_softmax=True)
+
+        # (batch_size, 1, c_len) x (batch_size, c_len, 2 * hidden_size) --> (batch_size, 1, 2 * hidden_size)
+        x = torch.bmm(x.unsqueeze(1), h_emb)
+        h_1, _ = self.gru(x) # (batch_size, 1, 2 * hidden_size)
+        x = self.w_h_p(h_emb) + self.w_h_a(h_1) # (batch_size, c_len, 2 * hidden_size)
+        x = self.tanh(x)
+        x = self.v_t(x).squeeze(2) # (batch_size, c_len)
+        p2 = masked_softmax(x, mask, log_softmax=True)
+
+        return p1, p2
 
 # ------------------------------------------------------------------------------------------------------- #
 
