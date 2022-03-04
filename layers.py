@@ -111,6 +111,63 @@ class GRUEncoder(nn.Module):
 
         return x
 
+class GatedAttentionBasedRNNVec(nn.Module):
+    """
+    Trying below without adding the hidden rnn state
+    """
+
+    def __init__(self, hidden_size, num_layers, drop_prob):
+        super(GatedAttentionBasedRNNVec, self).__init__()
+
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
+
+        # 2 * hidden_size because RNN is bidirectional.
+        self.question_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+        self.context_proj = nn.Linear(2 * hidden_size, 2 * hidden_size, bias=False)
+
+        self.gate_proj = nn.Linear(4 * hidden_size, 4 * hidden_size, bias=False)
+
+        self.v_t = nn.Linear(2 * hidden_size, 1, bias=False)
+
+        self.tanh = nn.Tanh()
+        self.sigmoid = nn.Sigmoid()
+
+        self.drop_prob = drop_prob
+
+        self.gru = nn.GRU(input_size=4 * hidden_size,
+                          hidden_size=hidden_size,
+                          num_layers=num_layers,
+                          batch_first=True,
+                          dropout=drop_prob,
+                          bidirectional=True)
+
+    def forward(self, q_emb, c_emb):
+        # q_emb shape: (batch_size, q_len, 2 * hidden_size)
+        # c_emb shape: (batch_size, c_len, 2 * hidden_size)
+        c_len = c_emb.shape[1]
+        # Final embedding shape of context
+        w_passage = self.context_proj(c_emb) # (batch_size, c_len, 2 * hidden_size)
+        w_q = self.question_proj(q_emb).unsqueeze(1).repeat(1, c_len, 1, 1) # (batch_size, c_len, q_len, 2 * hidden_size)
+        s = w_q + w_passage.unsqueeze(2) # (N, c_len, q_len, x) + (N, c_len, 1, x)
+        s = self.tanh(s)
+        s = self.v_t(s).squeeze(dim=3) # (batch_size, c_len, q_len)
+        s = F.softmax(s, dim=2)
+        # (batch_size, c_len, q_len) x (batch_size, q_len, 2 * hidden_size) --> (batch_size, c_len, 2 * hidden_size)
+        s = torch.bmm(s, q_emb)
+        # Rocktaschel et al 2015 we send s through the gru at this point, but
+        # Wang & Jiang 2016 we take passage and add passage as additional input with gate
+        s_concat = torch.cat((c_emb, s), dim=2) # (batch_size, c_len, 4 * hidden_size)
+        s = self.gate_proj(s_concat) # (W_g[u_t^P, c_t])
+        s = self.sigmoid(s)
+        s = torch.mul(s, s_concat) # (batch_size, c_len, 4 * hidden_size) for both element-wise
+        s, _ = self.gru(s) # (batch_size, c_len, 2 * hidden_size)
+
+        # No dropout on last layer
+        s = F.dropout(s, self.drop_prob, self.training)
+
+        return s
+
 class GatedAttentionBasedRNN(nn.Module):
     """
     This class implementes the Gated Attention-Based Recurrent Networks section 3.2 of the R-Net
@@ -205,10 +262,12 @@ class SelfMatchingAttention(nn.Module):
         self.tanh = nn.Tanh()
         self.sigmoid = nn.Sigmoid()
 
-        self.gru = GRUEncoder(input_size=4 * hidden_size,
-                              hidden_size=hidden_size,
-                              num_layers=num_layers,
-                              drop_prob=drop_prob)
+        self.gru = nn.GRU(input_size=4 * hidden_size,
+                          hidden_size=hidden_size,
+                          num_layers=num_layers,
+                          batch_first=True,
+                          dropout=drop_prob,
+                          bidirectional=True)
 
     def forward(self, emb, lengths):
         # emb is of shape (N, c_len, 2 * hidden_size)
@@ -229,7 +288,7 @@ class SelfMatchingAttention(nn.Module):
         x = self.sigmoid(x)
         x = torch.mul(x, x_concat)
 
-        x = self.gru(x, lengths) # (N, c_len, 2 * hidden_size)
+        x, _ = self.gru(x) # (N, c_len, 2 * hidden_size)
 
         return x
 

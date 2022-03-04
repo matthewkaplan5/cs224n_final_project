@@ -99,9 +99,9 @@ class RNet(nn.Module):
                                          num_layers=3,
                                          drop_prob=drop_prob)
 
-        self.gated_rnn = layers.GatedAttentionBasedRNN(hidden_size=hidden_size,
-                                                       num_layers=3,
-                                                       drop_prob=drop_prob)
+        self.gated_rnn = layers.GatedAttentionBasedRNNVec(hidden_size=hidden_size,
+                                                          num_layers=3,
+                                                          drop_prob=drop_prob)
 
         self.self_matching = layers.SelfMatchingAttention(hidden_size=hidden_size,
                                                           num_layers=3,
