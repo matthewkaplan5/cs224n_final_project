@@ -318,7 +318,7 @@ class EncoderBlock(nn.Module):
     """
 
     def __init__(self, num_conv, input_emb_size, output_emb_size, kernel_size, num_heads,
-                 ffn_hidden_size):
+                 ffn_hidden_size, drop_prob, layer_drop):
         super(EncoderBlock, self).__init__()
         assert num_conv > 0, 'There must be at least 1 convolution layer in an Encoder Block'
         # self.position_encoder = PositionalEncoding(emb_dim=input_emb_size)
@@ -337,7 +337,12 @@ class EncoderBlock(nn.Module):
         self.feed_forward_net = FeedForwardNet(embedding_dim=output_emb_size, hidden_size=ffn_hidden_size,
                                                output_size=output_emb_size)
 
-    def forward(self, x):
+        self.drop_prob = drop_prob
+        self.layer_drop = layer_drop
+
+    # TODO: ADD IN THE LAYER DROPOUT USING CURR AND TOTAL LAYERS AS APPROPRIATE
+    # PERHAPS ADD A RELU AFTER DOING THE CONV NET
+    def forward(self, x, curr_layer, total_layers):
         # First, add the PositionalEncoding
         x += position_encoder(x)
 
@@ -362,7 +367,17 @@ class EncoderBlock(nn.Module):
 
         return x
 
+    def layer_dropout(self, x, layer_dropout, drop_prob):
+        # layer_dropout is probability layer gets dropped.
+        # drop_prob is normal dropout probability
+        drop_layer = np.random.random() < layer_dropout
+        if drop_layer:
+            return torch.zeros_like(x)
+        else:
+            x = F.dropout(x, drop_prob, self.training)
+            return x
 
+# TODO: ENUMERATE TO KEEP TRACK OF NUM AND TOTAL LAYERS, SUPPORT DROPOUT AND LAYER DROPOUT
 class EncoderStack(nn.Module):
     """
     This stacks Encoder Blocks for the embeddings and model, illustrated by the
