@@ -340,8 +340,6 @@ class EncoderBlock(nn.Module):
         self.drop_prob = drop_prob
         self.layer_drop = layer_drop
 
-    # TODO: ADD IN THE LAYER DROPOUT USING CURR AND TOTAL LAYERS AS APPROPRIATE
-    # PERHAPS ADD A RELU AFTER DOING THE CONV NET
     def forward(self, x, curr_layer, total_layers):
         # First, add the PositionalEncoding
         x += position_encoder(x)
@@ -351,18 +349,24 @@ class EncoderBlock(nn.Module):
             out = x.clone()
             x = F.layer_norm(x, x.shape[1:])
             x = conv(x)
+            x = F.relu(x)
+            x = self.layer_dropout(x, ((curr_layer / total_layers) * self.layer_drop), self.drop_prob)
             x = x + out
+            curr_layer += 1
 
         # Now, self_attention(layernorm(x)) + x
         out = x.clone()
         x = F.layer_norm(x, x.shape[1:])
         x = self.self_attention(x)
+        x = self.layer_dropout(x, ((curr_layer / total_layers) * self.layer_drop), self.drop_prob)
         x = x + out
+        curr_layer += 1
 
         # Now, feed_forward_net(layernorm(x)) + x
         out = x.clone()
         x = F.layer_norm(x, x.shape[1:])
         x = self.feed_forward_net(x)
+        x = self.layer_dropout(x, ((curr_layer / total_layers) * self.layer_drop), self.drop_prob)
         x = x + out
 
         return x
@@ -370,14 +374,19 @@ class EncoderBlock(nn.Module):
     def layer_dropout(self, x, layer_dropout, drop_prob):
         # layer_dropout is probability layer gets dropped.
         # drop_prob is normal dropout probability
-        drop_layer = np.random.random() < layer_dropout
-        if drop_layer:
-            return torch.zeros_like(x)
-        else:
-            x = F.dropout(x, drop_prob, self.training)
-            return x
 
-# TODO: ENUMERATE TO KEEP TRACK OF NUM AND TOTAL LAYERS, SUPPORT DROPOUT AND LAYER DROPOUT
+        # Only want to do this during training.
+        if self.training:
+            drop_layer = np.random.random() < layer_dropout
+            if drop_layer:
+                return torch.zeros_like(x)
+            else:
+                x = F.dropout(x, drop_prob, self.training)
+                return x
+        else:
+            # Return dropout of x on eval setting
+            return F.dropout(x, drop_prob, self.training)
+
 class EncoderStack(nn.Module):
     """
     This stacks Encoder Blocks for the embeddings and model, illustrated by the
@@ -386,28 +395,42 @@ class EncoderStack(nn.Module):
     """
 
     def __init__(self, num_blocks, num_conv_layers, input_emb_size, output_emb_size,
-                 kernel_size, num_attn_heads, ffn_hidden_size):
+                 kernel_size, num_attn_heads, ffn_hidden_size, drop_prob):
         super(EncoderStack, self).__init__()
         assert num_blocks > 0, 'There must be at least 1 block i the Embedding Encoder Stack'
+
+        # Layer Drop is 1 - p_L
+        self.layer_drop = .1
+
         self.encoder_blocks = nn.ModuleList([])
         self.encoder_blocks.append(EncoderBlock(num_conv=num_conv_layers,
                                                 input_emb_size=input_emb_size,
                                                 output_emb_size=output_emb_size,
                                                 kernel_size=kernel_size,
                                                 num_heads=num_attn_heads,
-                                                ffn_hidden_size=ffn_hidden_size))
+                                                ffn_hidden_size=ffn_hidden_size,
+                                                layer_drop=self.layer_drop,
+                                                drop_prob=drop_prob))
         for i in range(num_blocks - 1):
             self.encoder_blocks.append(EncoderBlock(num_conv=num_conv_layers,
                                                     input_emb_size=output_emb_size,
                                                     output_emb_size=output_emb_size,
                                                     kernel_size=kernel_size,
                                                     num_heads=num_attn_heads,
-                                                    ffn_hidden_size=ffn_hidden_size))
+                                                    ffn_hidden_size=ffn_hidden_size,
+                                                    layer_drop=self.layer_drop,
+                                                    drop_prob=drop_prob))
+
+        self.num_blocks = num_blocks
+        self.num_conv_layers = num_conv_layers
 
     def forward(self, x):
         # x of shape (batch_size, seq_len, input_emb_size)
+        total_layers = self.num_blocks * (self.num_conv_layers + 2)
+        curr_layer = 1
         for encoder_block in self.encoder_blocks:
-            x = encoder_block(x)
+            x = encoder_block(x, curr_layer, total_layers)
+            curr_layer += (self.num_conv_layers + 2)
         # x of shape (batch_size, seq_len, output_emb_size)
         return x
 
