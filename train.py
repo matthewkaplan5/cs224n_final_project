@@ -74,6 +74,12 @@ def main(args):
 
     # Get optimizer and scheduler
     optimizer = optim.Adadelta(params=model.parameters(), lr=args.lr, weight_decay=args.l2_wd)
+    # Inverse exponential warm up args.lr in first 1000 steps
+    # Warm up from 0 = log_{num_steps}(1) * lr to log_{num_steps}(1000) * lr = lr
+    # but by going from log_{num_steps}(0) --> log_{num_steps}(num_steps) inverse exponential.
+    # I leverage property that log_b(a) = ln(a) / ln(b)
+    # scheduler = sched.LambdaLR(optimizer,
+    #                           lr_lambda=lambda curr_step: np.log(curr_step + 1) / np.log(1000) if curr_step < 1000 else 1)
     scheduler = sched.LambdaLR(optimizer, lambda s: 1.)  # Constant LR
 
     # Get data loader

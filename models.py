@@ -98,7 +98,8 @@ class QANet(nn.Module):
                                              output_emb_size=hidden_size,
                                              kernel_size=7,
                                              num_attn_heads=8,
-                                             ffn_hidden_size=1024)
+                                             ffn_hidden_size=1024,
+                                             drop_prob=drop_prob)
 
         self.emb_enc_2 = layers.EncoderStack(num_blocks=1,
                                              num_conv_layers=4,
@@ -106,7 +107,8 @@ class QANet(nn.Module):
                                              output_emb_size=hidden_size,
                                              kernel_size=7,
                                              num_attn_heads=8,
-                                             ffn_hidden_size=1024)
+                                             ffn_hidden_size=1024,
+                                             drop_prob=drop_prob)
 
         self.att = layers.BiDAFAttention(hidden_size=hidden_size,
                                          drop_prob=drop_prob)
@@ -120,7 +122,8 @@ class QANet(nn.Module):
                                              output_emb_size=hidden_size,
                                              kernel_size=5,
                                              num_attn_heads=8,
-                                             ffn_hidden_size=1024)
+                                             ffn_hidden_size=1024,
+                                             drop_prob=drop_prob)
 
         self.out = layers.QANetOutput(input_size=hidden_size)
 
@@ -134,17 +137,14 @@ class QANet(nn.Module):
         c_enc = self.emb_enc_1(c_emb) # (batch_size, c_len, hidden_size)
         q_enc = self.emb_enc_2(q_emb) # (batch_size, q_len, hidden_size)
 
-        c_enc = F.dropout(c_enc, p=0.1, training=self.training)
-        q_enc = F.dropout(q_enc, p=0.1, training=self.training)
-
         att = self.att(c_enc, q_enc, cw_mask, qw_mask)  # (batch_size, c_len, 4 * hidden_size)
 
+        # Attention does not include dropout so we add here.
         att = F.dropout(att, p=0.1, training=self.training)
 
         att = self.ffn(att) # (batch_size, c_len, hidden_size)
 
         m_0 = self.model_enc(att) # (batch_size, c_len, hidden_size)
-
         m_1 = self.model_enc(m_0.clone()) # (batch_size, c_len, hidden_size)
         m_2 = self.model_enc(m_1.clone()) # (batch_size, c_len, hidden_size)
 
